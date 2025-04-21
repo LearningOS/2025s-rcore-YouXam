@@ -169,3 +169,8 @@ pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
 }
+
+/// Get the current task id
+pub fn get_current_task_id() -> usize {
+    TASK_MANAGER.inner.exclusive_access().current_task
+}
