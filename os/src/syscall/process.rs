@@ -94,6 +94,6 @@ pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
             core::ptr::write_volatile(_id as *mut u8, _data as u8);
             0
         },
-        _ => panic!("Unsupported trace request: {}", _trace_request),
+        _ => -1
     }
 }
