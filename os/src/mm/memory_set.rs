@@ -63,6 +63,25 @@ impl MemorySet {
             None,
         );
     }
+    /// remove_framed_area
+    pub fn remove_framed_area(&mut self, start_va: VirtAddr, end_va: VirtAddr) {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        let mut area_idx = None;
+        for (idx, area) in self.areas.iter().enumerate() {
+            if area.vpn_range.get_start() == start_vpn && area.map_type == MapType::Framed {
+                area_idx = Some(idx);
+                break;
+            }
+        }
+        if let Some(idx) = area_idx {
+            let area = &mut self.areas[idx];
+            for vpn in VPNRange::new(start_vpn, end_vpn) {
+                area.unmap_one(&mut self.page_table, vpn);
+            }
+            self.areas.remove(idx);
+        }
+    }
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {

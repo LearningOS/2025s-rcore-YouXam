@@ -15,6 +15,7 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr, StepByOne};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -116,7 +117,7 @@ impl TaskManager {
 
     /// Get the current 'Running' task's token.
     fn get_current_token(&self) -> usize {
-        let inner = self.inner.exclusive_access();
+        let inner: core::cell::RefMut<'_, TaskManagerInner> = self.inner.exclusive_access();
         inner.tasks[inner.current_task].get_user_token()
     }
 
@@ -152,6 +153,54 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    /// mmap is used to map a range of virtual memory to a physical memory.
+    pub fn mmap(&self, start: VirtAddr, end: VirtAddr, permission: MapPermission) -> Result<(), &'static str> {
+        if start.page_offset() != 0 {
+            return Err("start address is not aligned");
+        }
+
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let mem = &mut inner.tasks[cur].memory_set;
+        
+        let start_page = start.floor();
+        let end_page = end.ceil();
+        let mut cur_page = start_page;
+        while cur_page < end_page {
+            match mem.translate(cur_page) {
+                Some(page_entry) if page_entry.is_valid() => return Err("page already mapped"),
+                _ => {}
+            }
+            cur_page.step();
+        }
+        mem.insert_framed_area(start, end, permission);
+        Ok(())
+    }
+
+    /// munmap is used to unmap a range of virtual memory.
+    pub fn munmap(&self, start: VirtAddr, end: VirtAddr) -> Result<(), &'static str> {
+        if start.page_offset() != 0 {
+            return Err("start address is not aligned");
+        }
+
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let mem = &mut inner.tasks[cur].memory_set;
+        
+        let start_page = start.floor();
+        let end_page = end.ceil();
+        let mut cur_page = start_page;
+        while cur_page < end_page {
+            match mem.translate(cur_page) {
+                Some(page_entry) if page_entry.is_valid() => {}
+                _ => return Err("page not mapped"),
+            }
+            cur_page.step();
+        }
+        mem.remove_framed_area(start, end);
+        Ok(())
     }
 }
 
@@ -201,4 +250,9 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Get the current 'Running' task's id.
+pub fn get_current_task_id() -> usize {
+    TASK_MANAGER.inner.exclusive_access().current_task
 }
