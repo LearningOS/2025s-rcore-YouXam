@@ -2,7 +2,7 @@
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::TRAP_CONTEXT_BASE;
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{MapPermission, MemorySet, PhysPageNum, StepByOne, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
@@ -68,6 +68,12 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Priority of the task
+    pub priority: usize,
+
+    /// Stride of the task
+    pub stride: usize,
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +124,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: 16,
+                    stride: 0,
                 })
             },
         };
@@ -131,6 +139,29 @@ impl TaskControlBlock {
             trap_handler as usize,
         );
         task_control_block
+    }
+
+    /// mmap is used to map a range of virtual memory to a physical memory.
+    pub fn mmap(&self, start: VirtAddr, end: VirtAddr, permission: MapPermission) -> Result<(), &'static str> {
+        if start.page_offset() != 0 {
+            return Err("start address is not aligned");
+        }
+
+        let mut inner = self.inner.exclusive_access();
+        let mem = &mut inner.memory_set;
+        
+        let start_page = start.floor();
+        let end_page = end.ceil();
+        let mut cur_page = start_page;
+        while cur_page < end_page {
+            match mem.translate(cur_page) {
+                Some(page_entry) if page_entry.is_valid() => return Err("page already mapped"),
+                _ => {}
+            }
+            cur_page.step();
+        }
+        mem.insert_framed_area(start, end, permission);
+        Ok(())
     }
 
     /// Load a new elf to replace the original application address space and start execution
@@ -162,6 +193,30 @@ impl TaskControlBlock {
         // **** release inner automatically
     }
 
+    /// munmap is used to unmap a range of virtual memory.
+    pub fn munmap(&self, start: VirtAddr, end: VirtAddr) -> Result<(), &'static str> {
+        if start.page_offset() != 0 {
+            return Err("start address is not aligned");
+        }
+
+        let mut inner = self.inner.exclusive_access();
+        let mem = &mut inner.memory_set;
+        
+        let start_page = start.floor();
+        let end_page = end.ceil();
+        let mut cur_page = start_page;
+        while cur_page < end_page {
+            match mem.translate(cur_page) {
+                Some(page_entry) if page_entry.is_valid() => {}
+                _ => return Err("page not mapped"),
+            }
+            mem.remove_area_with_start_vpn(cur_page);
+            cur_page.step();
+        }
+        
+        Ok(())
+    }
+
     /// parent process fork the child process
     pub fn fork(self: &Arc<Self>) -> Arc<Self> {
         // ---- access parent PCB exclusively
@@ -191,6 +246,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: parent_inner.priority,
+                    stride: parent_inner.stride,
                 })
             },
         });
