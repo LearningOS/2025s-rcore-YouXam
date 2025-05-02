@@ -1,6 +1,8 @@
 //! File and filesystem-related syscalls
-use crate::fs::{open_file, OpenFlags, Stat};
+
+use crate::fs::{linkat, open_file, unlinkat, OpenFlags, Stat, StatMode};
 use crate::mm::{translated_byte_buffer, translated_str, UserBuffer};
+use crate::syscall::process::copy_to_user;
 use crate::task::{current_task, current_user_token};
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
@@ -76,21 +78,44 @@ pub fn sys_close(fd: usize) -> isize {
 }
 
 /// YOUR JOB: Implement fstat.
-pub fn sys_fstat(_fd: usize, _st: *mut Stat) -> isize {
+pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     trace!(
-        "kernel:pid[{}] sys_fstat NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_fstat",
         current_task().unwrap().pid.0
     );
-    -1
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return -1;
+    }
+    if let Some(file) = &inner.fd_table[fd] {
+        let file = file.clone();
+        drop(inner);
+        let mut new_st = Stat {
+            dev: 0,
+            ino: 0,
+            mode: StatMode::NULL,
+            nlink: 1,
+            pad: [0; 7],
+        };
+        file.fstat(&mut new_st as *mut Stat);
+        unsafe { copy_to_user(&new_st, st as usize) };
+        0
+    } else {
+        -1
+    }
 }
 
 /// YOUR JOB: Implement linkat.
-pub fn sys_linkat(_old_name: *const u8, _new_name: *const u8) -> isize {
+pub fn sys_linkat(old_name: *const u8, new_name: *const u8) -> isize {
     trace!(
-        "kernel:pid[{}] sys_linkat NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_linkat",
         current_task().unwrap().pid.0
     );
-    -1
+    let token = current_user_token();
+    let old_name_str = translated_str(token, old_name);
+    let new_name_str = translated_str(token, new_name);
+    linkat(old_name_str.as_str(), new_name_str.as_str())
 }
 
 /// YOUR JOB: Implement unlinkat.
@@ -99,5 +124,7 @@ pub fn sys_unlinkat(_name: *const u8) -> isize {
         "kernel:pid[{}] sys_unlinkat NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let token = current_user_token();
+    let name_str = translated_str(token, _name);
+    unlinkat(name_str.as_str())
 }

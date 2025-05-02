@@ -8,7 +8,8 @@ use alloc::vec::Vec;
 use spin::{Mutex, MutexGuard};
 /// Virtual filesystem layer over easy-fs
 pub struct Inode {
-    block_id: usize,
+    /// Block id of the inode
+    pub block_id: usize,
     block_offset: usize,
     fs: Arc<Mutex<EasyFileSystem>>,
     block_device: Arc<dyn BlockDevice>,
@@ -64,6 +65,7 @@ impl Inode {
         self.read_disk_inode(|disk_inode| {
             self.find_inode_id(name, disk_inode).map(|inode_id| {
                 let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id);
+                log::debug!("find: name: {}, inode_id:{} block_id: {}", name, inode_id, block_id);
                 Arc::new(Self::new(
                     block_id,
                     block_offset,
@@ -154,6 +156,115 @@ impl Inode {
             }
             v
         })
+    }
+    /// Create a hard link
+    pub fn linkat(&self, old_path: &str, new_path: &str) -> isize {
+        if old_path == new_path {
+            log::error!("linkat: old_path and new_path are the same");
+            return -1;
+        }
+        let Some(old_inode) = self.find(old_path) else {
+            log::error!("linkat: old_path not found");
+            return -1;
+        };
+        let mut fs = self.fs.lock();
+        get_block_cache(old_inode.block_id, Arc::clone(&self.block_device))
+            .lock()
+            .modify(old_inode.block_offset, |disk_inode: &mut DiskInode| {
+                disk_inode.link_count += 1;
+            });
+        // create a new link
+        self.modify_disk_inode(|root_inode| {
+            // append file in the dirent
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let new_size = (file_count + 1) * DIRENT_SZ;
+            // increase size
+            self.increase_size(new_size as u32, root_inode, &mut fs);
+            let Some(inode_id) = self.find_inode_id(old_path, root_inode) else {
+                log::error!("linkat: old_path not found in root_inode");
+                return;
+            };
+            // write dirent
+            log::debug!("linkat: {:?} link to block {}", new_path, inode_id);
+            let dirent = DirEntry::new(new_path, inode_id);
+            root_inode.write_at(
+                file_count * DIRENT_SZ,
+                dirent.as_bytes(),
+                &self.block_device,
+            );
+        });
+        block_cache_sync_all();
+        0
+    }
+    /// Remove a hard link
+    pub fn unlinkat(&self, path: &str) -> isize {
+        let Some(inode) = self.find(path) else {
+            log::error!("unlinkat: path not found");
+            return -1;
+        };
+        let mut fs = self.fs.lock();
+        get_block_cache(inode.block_id, Arc::clone(&self.block_device))
+            .lock()
+            .modify(inode.block_offset, |disk_inode: &mut DiskInode| {
+                disk_inode.link_count -= 1;
+                if disk_inode.link_count == 0 {
+                    // dealloc data blocks
+                    let data_blocks_dealloc = disk_inode.clear_size(&self.block_device);
+                    for data_block in data_blocks_dealloc.into_iter() {
+                        fs.dealloc_data(data_block);
+                    }
+                    fs.dealloc_inode(inode.block_id as u32);
+                }
+            });
+        // remove dirent
+        self.modify_disk_inode(|root_inode| {
+            assert!(root_inode.is_dir());
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let mut dirent = DirEntry::empty();
+            let mut found = false;
+            let mut idx = 0;
+            for i in 0..file_count {
+                assert_eq!(
+                    root_inode.read_at(i * DIRENT_SZ, dirent.as_bytes_mut(), &self.block_device),
+                    DIRENT_SZ,
+                );
+                if dirent.name() == path {
+                    found = true;
+                    idx = i;
+                    break;
+                }
+            }
+            if !found {
+                return;
+            }
+            if idx != file_count - 1 {
+                let mut last_dirent = DirEntry::empty();
+                assert_eq!(
+                    root_inode.read_at(
+                        (file_count - 1) * DIRENT_SZ,
+                        last_dirent.as_bytes_mut(),
+                        &self.block_device,
+                    ),
+                    DIRENT_SZ,
+                );
+                root_inode.write_at(
+                    idx * DIRENT_SZ,
+                    last_dirent.as_bytes(),
+                    &self.block_device,
+                );
+            }
+            root_inode.size = ((file_count - 1) * DIRENT_SZ) as u32;
+        });
+        block_cache_sync_all();
+        0
+    }
+    /// Read stat of current inode (is_dir, nlink)
+    pub fn stat(&self) -> Option<(bool, u32)> {
+        log::debug!("stat: inode: {:?}", self.block_id);
+        Some(self.read_disk_inode(|disk_inode| {
+            log::debug!("stat: link_count: {:?}", disk_inode.link_count);
+            (disk_inode.is_dir(), disk_inode.link_count)
+        }))
     }
     /// Read data from current inode
     pub fn read_at(&self, offset: usize, buf: &mut [u8]) -> usize {

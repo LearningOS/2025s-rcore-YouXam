@@ -100,7 +100,7 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     // ---- release current PCB automatically
 }
 
-unsafe fn copy_to_user<T>(data: &T, addr: usize) {
+pub unsafe fn copy_to_user<T>(data: &T, addr: usize) {
     let dst_frames: alloc::vec::Vec<&mut [u8]> = translated_byte_buffer(
         current_user_token(),
         addr as *mut u8,
@@ -180,7 +180,7 @@ pub fn sys_sbrk(size: i32) -> isize {
     }
 }
 
-/// YOUR JOB: Implement spawn.
+// DONE: Implement spawn.
 /// HINT: fork + exec =/= spawn
 pub fn sys_spawn(path: *const u8) -> isize {
     trace!(
@@ -203,7 +203,7 @@ pub fn sys_spawn(path: *const u8) -> isize {
     new_pid as isize
 }
 
-// YOUR JOB: Set task priority.
+// DONE: Set task priority.
 pub fn sys_set_priority(prio: isize) -> isize {
     trace!(
         "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
