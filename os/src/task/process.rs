@@ -49,6 +49,8 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// deadlock detect
+    pub deadlock_detect: Option<(DeadLockDetect, DeadLockDetect)>,
 }
 
 impl ProcessControlBlockInner {
@@ -119,6 +121,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect: None,
                 })
             },
         });
@@ -149,6 +152,18 @@ impl ProcessControlBlock {
         // add main thread to scheduler
         add_task(task);
         process
+    }
+
+    /// enable or disable deadlock detect
+    pub fn enable_deadlock_detect(&self, enable: bool) -> isize {
+        trace!("kernel: enable_deadlock_detect");
+        let mut process_inner = self.inner_exclusive_access();
+        if enable && process_inner.deadlock_detect.is_none() {
+            process_inner.deadlock_detect = Some((DeadLockDetect::new(), DeadLockDetect::new()));
+        } else if !enable && process_inner.deadlock_detect.is_some() {
+            process_inner.deadlock_detect = None;
+        }
+        0
     }
 
     /// Only support processes with a single thread.
@@ -245,6 +260,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect: parent.deadlock_detect.clone(),
                 })
             },
         });
@@ -281,5 +297,100 @@ impl ProcessControlBlock {
     /// get pid
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+}
+
+#[derive(Clone)]
+pub struct DeadLockDetect {
+    pub resources: Vec<usize>,
+    pub avaliable: Vec<usize>,
+    pub allocation: Vec<Vec<usize>>,
+    pub need: Vec<Vec<usize>>,
+}
+
+impl DeadLockDetect {
+    pub fn new() -> Self {
+        DeadLockDetect {
+            resources: Vec::new(),
+            avaliable: Vec::new(),
+            allocation: Vec::new(),
+            need: Vec::new(),
+        }
+    }
+
+    pub fn add_resource(&mut self, resource: usize, num: usize) {
+        debug!("add resource {}*{}", resource, num);
+        if self.resources.iter().find(|r| **r == resource).is_none() {
+            self.resources.push(resource);
+        }
+        if resource >= self.avaliable.len() {
+            // new resource
+            self.avaliable.push(num);
+            for (thread_alloc, thread_need) in self.allocation.iter_mut().zip(self.need.iter_mut())
+            {
+                thread_alloc.push(0);
+                thread_need.push(0);
+            }
+        } else {
+            self.avaliable[resource] += num;
+        }
+        self.allocation.push(vec![0; self.resources.len()]);
+        self.need.push(vec![0; self.resources.len()]);
+    }
+    fn test(&mut self) -> bool {
+        let mut work = self.avaliable.clone();
+        let mut finish = vec![false; self.allocation.len()];
+        loop {
+            let mut found = false;
+            for i in 0..self.allocation.len() {
+                if !finish[i] && self.resources.iter().all(|j| self.need[i][*j] <= work[*j]) {
+                    finish[i] = true;
+                    found = true;
+                    for j in 0..self.resources.len() {
+                        work[j] += self.allocation[i][j];
+                    }
+                    break;
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+        for i in 0..finish.len() {
+            if !finish[i] {
+                return false;
+            }
+        }
+        true
+    }
+    fn resize_thread(&mut self, thread_id: usize) {
+        if thread_id >= self.allocation.len() {
+            for _ in self.allocation.len()..=thread_id {
+                self.allocation.push(vec![0; self.resources.len()]);
+                self.need.push(vec![0; self.resources.len()]);
+            }
+        }
+    }
+    pub fn request(&mut self, task_id: usize, resource_id: usize, num: usize) -> bool {
+        debug!("requesting resource {}*{} from task {}", resource_id, num, task_id);
+        self.resize_thread(task_id);
+        self.need[task_id][resource_id] += num;
+        if !self.test() {
+            warn!("request will cause deadlock");
+            self.need[task_id][resource_id] -= num;
+            return false;
+        }
+        let allocated = self.need[task_id][resource_id].min(self.avaliable[resource_id]);
+        debug!("allocated resource {}*{} to task {}", resource_id, allocated, task_id);
+        self.need[task_id][resource_id] -= allocated;
+        self.allocation[task_id][resource_id] += allocated;
+        self.avaliable[resource_id] -= allocated;
+        true
+    }
+    pub fn release(&mut self, task_id: usize, resource_id: usize, num: usize) {
+        debug!("release resource {} from task {}", resource_id, task_id);
+        self.resize_thread(task_id);
+        self.allocation[task_id][resource_id] -= num.min(self.allocation[task_id][resource_id]);
+        self.avaliable[resource_id] += num;
     }
 }
